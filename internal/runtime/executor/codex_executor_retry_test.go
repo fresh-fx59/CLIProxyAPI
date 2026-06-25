@@ -59,6 +59,39 @@ func TestParseCodexRetryAfter(t *testing.T) {
 			t.Fatalf("expected nil for non-usage_limit_reached, got %v", *got)
 		}
 	})
+
+	t.Run("caps a multi-hour resets_in_seconds", func(t *testing.T) {
+		// codex Plus plan often reports ~47-51h; the bench must be capped so the
+		// credential is re-probed within maxCodexQuotaCooldown, not benched for days.
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":176400}}`) // 49h
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != maxCodexQuotaCooldown {
+			t.Fatalf("retryAfter = %v, want cap %v", *retryAfter, maxCodexQuotaCooldown)
+		}
+	})
+
+	t.Run("caps a far-future resets_at", func(t *testing.T) {
+		resetAt := now.Add(49 * time.Hour).Unix()
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_at":` + itoa(resetAt) + `}}`)
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil {
+			t.Fatalf("expected retryAfter, got nil")
+		}
+		if *retryAfter != maxCodexQuotaCooldown {
+			t.Fatalf("retryAfter = %v, want cap %v", *retryAfter, maxCodexQuotaCooldown)
+		}
+	})
+
+	t.Run("short cooldown under the cap is unchanged", func(t *testing.T) {
+		body := []byte(`{"error":{"type":"usage_limit_reached","resets_in_seconds":300}}`) // 5m < 15m cap
+		retryAfter := parseCodexRetryAfter(http.StatusTooManyRequests, body, now)
+		if retryAfter == nil || *retryAfter != 5*time.Minute {
+			t.Fatalf("retryAfter = %v, want %v (uncapped)", retryAfter, 5*time.Minute)
+		}
+	})
 }
 
 func TestNewCodexStatusErrTreatsCapacityAsRetryableRateLimit(t *testing.T) {
