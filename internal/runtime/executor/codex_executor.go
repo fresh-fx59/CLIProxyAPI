@@ -1265,23 +1265,6 @@ func isCodexModelCapacityError(errorBody []byte) bool {
 	return false
 }
 
-// maxCodexQuotaCooldown caps how long a single 429/usage_limit_reached benches a codex
-// credential. Codex commonly reports a multi-hour reset (observed ~47-51h on the Plus plan),
-// and the scheduler honors RetryAfter verbatim — so ONE 429 sidelines that credential for
-// ~2 days with NO re-probe. With a small credential pool that strands the model on the paid
-// fallback long after the account (or codex itself) has recovered. Capping forces a re-probe
-// at most this far out: when the (capped) window elapses the selector retries the credential
-// and picks it back up the moment codex serves again. Cost is at most one wasted probe per
-// credential per interval; it can only SHORTEN a bench, never lengthen one.
-const maxCodexQuotaCooldown = 15 * time.Minute
-
-func capCodexCooldown(d time.Duration) *time.Duration {
-	if d > maxCodexQuotaCooldown {
-		d = maxCodexQuotaCooldown
-	}
-	return &d
-}
-
 func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time.Duration {
 	if statusCode != http.StatusTooManyRequests || len(errorBody) == 0 {
 		return nil
@@ -1292,11 +1275,13 @@ func parseCodexRetryAfter(statusCode int, errorBody []byte, now time.Time) *time
 	if resetsAt := gjson.GetBytes(errorBody, "error.resets_at").Int(); resetsAt > 0 {
 		resetAtTime := time.Unix(resetsAt, 0)
 		if resetAtTime.After(now) {
-			return capCodexCooldown(resetAtTime.Sub(now))
+			retryAfter := resetAtTime.Sub(now)
+			return &retryAfter
 		}
 	}
 	if resetsInSeconds := gjson.GetBytes(errorBody, "error.resets_in_seconds").Int(); resetsInSeconds > 0 {
-		return capCodexCooldown(time.Duration(resetsInSeconds) * time.Second)
+		retryAfter := time.Duration(resetsInSeconds) * time.Second
+		return &retryAfter
 	}
 	return nil
 }
