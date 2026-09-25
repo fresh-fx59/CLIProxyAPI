@@ -342,6 +342,13 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.id", st.ReasoningID)
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "output_index", st.ReasoningIndex)
 		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.summary.0.text", text)
+		// Round-trip carrier: some upstreams (DeepSeek thinking mode) REQUIRE the
+		// exact reasoning_content text to come back verbatim on the next turn's
+		// assistant message. Codex only ever echoes reasoning items back
+		// unchanged, so stash the raw text in encrypted_content (never left
+		// empty) rather than only in the human-readable summary; the request-side
+		// translator reads it back out of there.
+		outputItemDone, _ = sjson.SetBytes(outputItemDone, "item.encrypted_content", text)
 		out = append(out, emitRespEvent("response.output_item.done", outputItemDone))
 
 		st.Reasonings = append(st.Reasonings, oaiToResponsesStateReasoning{ReasoningID: st.ReasoningID, ReasoningData: text, OutputIndex: st.ReasoningIndex})
@@ -728,12 +735,18 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 		if strings.HasPrefix(rid, "resp_") {
 			rid = strings.TrimPrefix(rid, "resp_")
 		}
-		// Prefer summary_text from reasoning_content; encrypted_content is optional
+		// Populate BOTH the human-readable summary AND encrypted_content with the
+		// raw reasoning_content text. Codex treats encrypted_content as an opaque
+		// blob it must echo back unchanged on the next turn — some upstreams
+		// (DeepSeek thinking mode) require exactly that text to reappear as
+		// reasoning_content on the following assistant message, so leaving this
+		// field empty silently drops it and breaks the 2nd turn after a tool call.
 		reasoningItem := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[]}`)
 		reasoningItem, _ = sjson.SetBytes(reasoningItem, "id", fmt.Sprintf("rs_%s", rid))
 		if rcText != "" {
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.type", "summary_text")
 			reasoningItem, _ = sjson.SetBytes(reasoningItem, "summary.0.text", rcText)
+			reasoningItem, _ = sjson.SetBytes(reasoningItem, "encrypted_content", rcText)
 		}
 		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", reasoningItem)
 	}
