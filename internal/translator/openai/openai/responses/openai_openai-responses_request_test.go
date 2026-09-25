@@ -122,3 +122,76 @@ func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_DefersMessageUntil
 		t.Fatalf("messages.3.content = %q, want %q", got, "next")
 	}
 }
+
+// DeepSeek thinking mode requires the model's reasoning_content to be echoed
+// back on the assistant message that follows it (2026-09-25 round-trip fix).
+// Codex only ever echoes a "reasoning" item back unchanged, carrying the raw
+// text in encrypted_content (see the response-side translator), so this
+// verifies we recover it from there and reattach it to the RIGHT assistant
+// construct — including one that only carries tool_calls.
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentRoundTripsToToolCallMessage(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","id":"rs_1","encrypted_content":"thinking about ls","summary":[{"type":"summary_text","text":"thinking about ls"}]},
+			{"type":"function_call","call_id":"exec_command:0","name":"exec_command","arguments":"{\"cmd\":\"ls\"}"},
+			{"type":"function_call_output","call_id":"exec_command:0","output":"file1\nfile2"}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "thinking about ls" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "thinking about ls")
+	}
+	if got := len(gjson.GetBytes(out, "messages.0.tool_calls").Array()); got != 1 {
+		t.Fatalf("messages.0.tool_calls length = %d, want %d", got, 1)
+	}
+	if got := gjson.GetBytes(out, "messages.1.role").String(); got != "tool" {
+		t.Fatalf("messages.1.role = %q, want %q", got, "tool")
+	}
+}
+
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentRoundTripsToPlainMessage(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","id":"rs_2","encrypted_content":"thinking about the final answer","summary":[]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"3 files"}]}
+		]
+	}`)
+	t.Logf("input json:\n%s", prettyJSONForTest(raw))
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-flash", raw, false)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	if got := gjson.GetBytes(out, "messages.0.role").String(); got != "assistant" {
+		t.Fatalf("messages.0.role = %q, want %q", got, "assistant")
+	}
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "thinking about the final answer" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "thinking about the final answer")
+	}
+	if got := gjson.GetBytes(out, "messages.0.content.0.text").String(); got != "3 files" {
+		t.Fatalf("messages.0.content.0.text = %q, want %q", got, "3 files")
+	}
+}
+
+// Falls back to summary text when a (hypothetical, non-broker) client never
+// populated encrypted_content.
+func TestConvertOpenAIResponsesRequestToOpenAIChatCompletions_ReasoningContentFallsBackToSummary(t *testing.T) {
+	raw := []byte(`{
+		"input": [
+			{"type":"reasoning","id":"rs_3","summary":[{"type":"summary_text","text":"summary only"}]},
+			{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}
+		]
+	}`)
+
+	out := ConvertOpenAIResponsesRequestToOpenAIChatCompletions("deepseek-flash", raw, false)
+
+	if got := gjson.GetBytes(out, "messages.0.reasoning_content").String(); got != "summary only" {
+		t.Fatalf("messages.0.reasoning_content = %q, want %q", got, "summary only")
+	}
+}

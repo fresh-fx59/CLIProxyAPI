@@ -421,3 +421,38 @@ func TestConvertOpenAIChatCompletionsResponseToOpenAIResponses_FunctionCallDoneA
 		t.Fatalf("unexpected completed function_call order: %v", completedOrder)
 	}
 }
+
+// DeepSeek thinking mode requires reasoning_content to round-trip verbatim on
+// the NEXT turn. Codex only ever echoes a "reasoning" item's encrypted_content
+// back unchanged, so this pins that the non-stream translator populates
+// encrypted_content (not just the human-readable summary) with the raw
+// reasoning_content text — otherwise the request-side recovery in
+// openai_openai-responses_request.go has nothing to read.
+func TestConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream_ReasoningContentGoesToEncryptedContent(t *testing.T) {
+	requestRaw := []byte(`{"reasoning":{"effort":"high"}}`)
+	rawJSON := []byte(`{
+		"id": "chatcmpl-1",
+		"model": "deepseek-flash",
+		"choices": [{
+			"index": 0,
+			"finish_reason": "stop",
+			"message": {"role":"assistant","content":"3 files","reasoning_content":"the user wants a count"}
+		}],
+		"usage": {"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}
+	}`)
+
+	out := ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(context.Background(), "deepseek-flash", nil, requestRaw, rawJSON, nil)
+	t.Logf("output json:\n%s", prettyJSONForTest(out))
+
+	reasoningItems := gjson.GetBytes(out, "output.#(type==\"reasoning\")#")
+	if !reasoningItems.Exists() || len(reasoningItems.Array()) == 0 {
+		t.Fatalf("expected a reasoning output item, got none")
+	}
+	item := reasoningItems.Array()[0]
+	if got := item.Get("encrypted_content").String(); got != "the user wants a count" {
+		t.Fatalf("output.reasoning.encrypted_content = %q, want %q", got, "the user wants a count")
+	}
+	if got := item.Get("summary.0.text").String(); got != "the user wants a count" {
+		t.Fatalf("output.reasoning.summary.0.text = %q, want %q", got, "the user wants a count")
+	}
+}

@@ -75,12 +75,27 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 
+		// pendingReasoningContent carries a "reasoning" input item's text forward to
+		// the assistant construct it belongs to (either the plain "message" that
+		// follows it, or the assistant(tool_calls) message flushed from a
+		// "function_call" burst). DeepSeek's thinking mode requires the prior
+		// turn's reasoning_content to be echoed back verbatim on assistant
+		// messages (including ones that only carry tool_calls) — see
+		// docs/references/deepseek-thinking-round-trip.md in the operator's fork.
+		// Populated below in the "reasoning" case; consumed (and reset) at the
+		// next assistant "message" or the next flushPendingToolCalls().
+		pendingReasoningContent := ""
+
 		flushPendingToolCalls := func() {
 			if len(pendingToolCalls) == 0 {
 				return
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoningContent != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoningContent)
+				pendingReasoningContent = ""
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -170,7 +185,31 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				if role == "assistant" && pendingReasoningContent != "" {
+					message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoningContent)
+					pendingReasoningContent = ""
+				}
+
 				appendRegularMessage(message)
+
+			case "reasoning":
+				// Prior-turn reasoning item echoed back by the client. Recover the
+				// text we round-tripped in encrypted_content (see the response-side
+				// translator, which stuffs the model's reasoning_content there
+				// verbatim rather than leaving it empty) and stash it so it lands
+				// on the assistant message/tool_calls this reasoning belongs to.
+				// Falls back to the summary text for any upstream that only ever
+				// populated that field.
+				if ec := item.Get("encrypted_content"); ec.Exists() && ec.String() != "" {
+					pendingReasoningContent = ec.String()
+				} else if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					var sb strings.Builder
+					summary.ForEach(func(_, s gjson.Result) bool {
+						sb.WriteString(s.Get("text").String())
+						return true
+					})
+					pendingReasoningContent = sb.String()
+				}
 
 			case "function_call":
 				// Buffer consecutive function calls and emit them as one assistant message.
